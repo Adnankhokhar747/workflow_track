@@ -137,13 +137,18 @@ app_license = "mit"
 # ---------------
 # Hook on document methods and events
 
-# doc_events = {
-# 	"*": {
-# 		"on_update": "method",
-# 		"on_cancel": "method",
-# 		"on_trash": "method"
-# 	}
-# }
+doc_events = {
+	"*": {
+		"before_save": "workflow_tracker.utils.log_workflow_state_change",
+		"before_submit": "workflow_tracker.utils.log_workflow_state_change",
+		"before_cancel": "workflow_tracker.utils.log_workflow_state_change",
+		"before_update_after_submit": "workflow_tracker.utils.log_workflow_state_change",
+	},
+	"Workflow": {
+		"after_insert": "workflow_tracker.utils.ensure_workflow_log_field",
+		"on_update": "workflow_tracker.utils.ensure_workflow_log_field",
+	},
+}
 
 # Scheduled Tasks
 # ---------------
