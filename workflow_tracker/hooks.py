@@ -85,6 +85,15 @@ app_license = "mit"
 # before_install = "workflow_tracker.install.before_install"
 after_install = "workflow_tracker.setup.after_install"
 
+# Migration Hooks
+# ----------------
+# Re-run on every `bench migrate` so any workflow that is (or becomes) active
+# on the site - whether it predates this app or was added since - always has
+# the workflow_log field attached, even if it was never resaved through the
+# "Workflow" doctype's own on_update hook.
+
+after_migrate = ["workflow_tracker.setup.backfill_existing_workflows"]
+
 # Uninstallation
 # ------------
 
