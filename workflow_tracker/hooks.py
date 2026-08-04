@@ -83,7 +83,7 @@ app_license = "mit"
 # ------------
 
 # before_install = "workflow_tracker.install.before_install"
-# after_install = "workflow_tracker.install.after_install"
+after_install = "workflow_tracker.setup.after_install"
 
 # Uninstallation
 # ------------
