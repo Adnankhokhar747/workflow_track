@@ -23,6 +23,91 @@ def backfill_existing_workflows():
 		ensure_workflow_log_field(frappe.get_doc("Workflow", name))
 
 
+def backfill_workflow_log_history(document_type=None):
+	"""Reconstruct Workflow Log rows for documents that changed workflow state before this app
+	was installed, using Frappe's built-in Version (change log) history.
+
+	Only touches documents that currently have zero Workflow Log rows, so it never duplicates or
+	reorders anything the live tracking hook has already recorded going forward. Requires the
+	doctype's "Track Changes" option to have been enabled at the time - otherwise no history
+	exists to reconstruct and the doctype is reported as skipped.
+
+	The reconstructed rows have no `action` (Version history doesn't record the workflow action
+	name, only the field's before/after value) - `from_state`, `to_state`, `changed_by`, and
+	`changed_on` are still accurate.
+
+	Pass `document_type` to limit the scan to a single doctype; omit to run for every doctype
+	that currently has an active Workflow. Returns a per-doctype summary dict.
+	"""
+	workflows = frappe.get_all(
+		"Workflow", filters={"is_active": 1}, fields=["document_type", "workflow_state_field"]
+	)
+	if document_type:
+		workflows = [w for w in workflows if w.document_type == document_type]
+
+	summary = {}
+	for wf in workflows:
+		summary[wf.document_type] = _backfill_history_for_doctype(wf.document_type, wf.workflow_state_field)
+
+	frappe.db.commit()
+	return summary
+
+
+def _backfill_history_for_doctype(doctype, state_field):
+	meta = frappe.get_meta(doctype)
+	if not meta.get_field("workflow_log"):
+		return {"skipped": "workflow_log field is not attached to this doctype yet"}
+	if not meta.get("track_changes"):
+		return {"skipped": "Track Changes is off for this doctype - no history to reconstruct"}
+
+	docnames = frappe.get_all(doctype, pluck="name")
+	updated = 0
+	for docname in docnames:
+		if _backfill_history_for_document(doctype, docname, state_field):
+			updated += 1
+
+	return {"documents_checked": len(docnames), "documents_updated": updated}
+
+
+def _backfill_history_for_document(doctype, docname, state_field):
+	if frappe.db.count("Workflow State Log", {"parenttype": doctype, "parent": docname}):
+		return False  # already has tracked entries - leave as-is to avoid duplicating/misordering
+
+	versions = frappe.get_all(
+		"Version",
+		filters={"ref_doctype": doctype, "docname": docname},
+		fields=["data", "owner", "creation"],
+		order_by="creation asc",
+	)
+
+	rows = []
+	for v in versions:
+		data = frappe.parse_json(v.data) or {}
+		for change in data.get("changed") or []:
+			fieldname, old_value, new_value = change[0], change[1], change[2]
+			if fieldname == state_field and old_value != new_value:
+				rows.append(
+					{"from_state": old_value, "to_state": new_value, "changed_by": v.owner, "changed_on": v.creation}
+				)
+
+	if not rows:
+		return False
+
+	for idx, row in enumerate(rows, start=1):
+		child = frappe.new_doc("Workflow State Log")
+		child.update(row)
+		child.action = ""
+		child.parent = docname
+		child.parenttype = doctype
+		child.parentfield = "workflow_log"
+		child.idx = idx
+		child.creation = child.modified = row["changed_on"]
+		child.owner = child.modified_by = row["changed_by"]
+		child.db_insert()
+
+	return True
+
+
 def _ensure_workflow_state(state):
 	if not frappe.db.exists("Workflow State", state):
 		frappe.get_doc({"doctype": "Workflow State", "workflow_state_name": state}).insert(

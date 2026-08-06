@@ -16,6 +16,7 @@ class TestWorkflowStateLog(FrappeTestCase):
 	@classmethod
 	def tearDownClass(cls):
 		frappe.db.delete(TEST_DOCTYPE)
+		frappe.db.delete("Version", {"ref_doctype": TEST_DOCTYPE})
 		frappe.delete_doc("Workflow", TEST_WORKFLOW, force=True, ignore_permissions=True)
 		frappe.delete_doc("DocType", TEST_DOCTYPE, force=True, ignore_permissions=True)
 		super().tearDownClass()
@@ -37,6 +38,7 @@ class TestWorkflowStateLog(FrappeTestCase):
 					{"fieldname": "title", "fieldtype": "Data", "label": "Title"},
 					{"fieldname": "workflow_state", "fieldtype": "Data", "label": "Workflow State"},
 				],
+				"track_changes": 1,
 				"permissions": [
 					{"role": "System Manager", "read": 1, "write": 1, "create": 1, "delete": 1}
 				],
@@ -124,6 +126,43 @@ class TestWorkflowStateLog(FrappeTestCase):
 		self.assertEqual(log[1].from_state, "Pending Approval")
 		self.assertEqual(log[1].to_state, "Approved")
 		self.assertEqual(log[1].action, "Approve")
+
+	def test_history_backfill_reconstructs_pre_existing_transitions(self):
+		from workflow_tracker.setup import backfill_workflow_log_history
+
+		doc = frappe.get_doc(
+			{"doctype": TEST_DOCTYPE, "title": "Pre-existing Record", "workflow_state": "Draft"}
+		).insert(ignore_permissions=True)
+
+		# `bench run-tests` skips Version tracking by default (save()'s ignore_version defaults
+		# to frappe.flags.in_test) - flip it off just for this transition so a real Version row
+		# gets written, mirroring what happens on a live site outside the test runner.
+		frappe.flags.in_test = False
+		try:
+			frappe.form_dict["action"] = "Submit for Approval"
+			apply_workflow(doc, "Submit for Approval")
+			frappe.form_dict.pop("action", None)
+		finally:
+			frappe.flags.in_test = True
+
+		# simulate a document that transitioned states before this app tracked anything:
+		# the Version history is real, but no Workflow Log rows exist for it yet.
+		frappe.db.delete("Workflow State Log", {"parenttype": TEST_DOCTYPE, "parent": doc.name})
+
+		summary = backfill_workflow_log_history(document_type=TEST_DOCTYPE)
+		self.assertEqual(summary[TEST_DOCTYPE]["documents_updated"], 1)
+
+		log = frappe.get_doc(TEST_DOCTYPE, doc.name).get("workflow_log")
+		self.assertEqual(len(log), 1)
+		self.assertEqual(log[0].from_state, "Draft")
+		self.assertEqual(log[0].to_state, "Pending Approval")
+		self.assertEqual(log[0].changed_by, "Administrator")
+		self.assertIsNotNone(log[0].changed_on)
+
+		# re-running must not duplicate rows that are already there
+		second_summary = backfill_workflow_log_history(document_type=TEST_DOCTYPE)
+		self.assertEqual(second_summary[TEST_DOCTYPE]["documents_updated"], 0)
+		self.assertEqual(len(frappe.get_doc(TEST_DOCTYPE, doc.name).get("workflow_log")), 1)
 
 	def test_unrelated_save_does_not_add_log_row(self):
 		doc = frappe.get_doc(
