@@ -44,14 +44,20 @@ def backfill_workflow_log_history(document_type=None):
 	behind the scenes even without `bench execute` access). It's also safe to re-run manually
 	any time via `bench --site <site> execute workflow_tracker.setup.backfill_workflow_log_history`.
 
-	Only touches documents that currently have zero Workflow Log rows, so it never duplicates or
-	reorders anything the live tracking hook has already recorded going forward. Requires the
-	doctype's "Track Changes" option to have been enabled at the time - otherwise no history
-	exists to reconstruct and the doctype is reported as skipped.
+	Covers every document with a gap in its history, not just ones that have never been tracked
+	at all: a document that transitioned once before this app existed and again afterwards (so it
+	already has some live-tracked rows) still gets its earlier, missing transitions filled in -
+	only the portion that predates the earliest row already being tracked live. Nothing that's
+	already tracked is ever touched, duplicated, or reordered.
 
-	The reconstructed rows have no `action` (Version history doesn't record the workflow action
-	name, only the field's before/after value) - `from_state`, `to_state`, `changed_by`,
-	`changed_by_name`, and `changed_on` are still accurate.
+	`action` is usually filled in too: even though Version history only records the state's
+	before/after value (not which workflow action caused it), most workflows have exactly one
+	action per (from_state, to_state) pair, so it can be looked up from the Workflow's own
+	transition definitions. Left blank only when that mapping is ambiguous (two different actions
+	lead through the same pair of states) or the workflow has since changed.
+
+	Requires the doctype's "Track Changes" option to have been enabled at the time - otherwise no
+	history exists to reconstruct and the doctype is reported as skipped.
 
 	Pass `document_type` to limit the scan to a single doctype; omit to run for every doctype
 	that currently has an active Workflow. Returns a per-doctype summary dict.
@@ -70,6 +76,35 @@ def backfill_workflow_log_history(document_type=None):
 	return summary
 
 
+def _build_transition_action_map(doctype):
+	"""Best-effort (from_state, to_state) -> action name map, built from the doctype's active
+	Workflow transitions. A pair is only included if it unambiguously maps to one action - if two
+	transitions share the same from/to states with different actions, history alone can't tell
+	them apart, so neither is guessed."""
+	workflow_names = frappe.get_all(
+		"Workflow", filters={"document_type": doctype, "is_active": 1}, pluck="name"
+	)
+	if not workflow_names:
+		return {}
+
+	transitions = frappe.get_all(
+		"Workflow Transition",
+		filters={"parenttype": "Workflow", "parent": ["in", workflow_names]},
+		fields=["state", "next_state", "action"],
+	)
+
+	mapping = {}
+	ambiguous = set()
+	for t in transitions:
+		key = (t.state, t.next_state)
+		if key in mapping and mapping[key] != t.action:
+			ambiguous.add(key)
+		mapping[key] = t.action
+	for key in ambiguous:
+		mapping.pop(key, None)
+	return mapping
+
+
 def _backfill_history_for_doctype(doctype, state_field):
 	meta = frappe.get_meta(doctype)
 	if not meta.get_field("workflow_log"):
@@ -77,18 +112,24 @@ def _backfill_history_for_doctype(doctype, state_field):
 	if not meta.get("track_changes"):
 		return {"skipped": "Track Changes is off for this doctype - no history to reconstruct"}
 
+	action_map = _build_transition_action_map(doctype)
+
 	docnames = frappe.get_all(doctype, pluck="name")
 	updated = 0
 	for docname in docnames:
-		if _backfill_history_for_document(doctype, docname, state_field):
+		if _backfill_history_for_document(doctype, docname, state_field, action_map):
 			updated += 1
 
 	return {"documents_checked": len(docnames), "documents_updated": updated}
 
 
-def _backfill_history_for_document(doctype, docname, state_field):
-	if frappe.db.count("Workflow State Log", {"parenttype": doctype, "parent": docname}):
-		return False  # already has tracked entries - leave as-is to avoid duplicating/misordering
+def _backfill_history_for_document(doctype, docname, state_field, action_map):
+	existing = frappe.get_all(
+		"Workflow State Log",
+		filters={"parenttype": doctype, "parent": docname},
+		fields=["name", "idx", "changed_on"],
+		order_by="idx asc",
+	)
 
 	versions = frappe.get_all(
 		"Version",
@@ -97,29 +138,46 @@ def _backfill_history_for_document(doctype, docname, state_field):
 		order_by="creation asc",
 	)
 
-	rows = []
+	candidates = []
 	for v in versions:
 		data = frappe.parse_json(v.data) or {}
 		for change in data.get("changed") or []:
 			fieldname, old_value, new_value = change[0], change[1], change[2]
 			if fieldname == state_field and old_value != new_value:
-				rows.append(
+				candidates.append(
 					{
 						"from_state": old_value,
 						"to_state": new_value,
+						"action": action_map.get((old_value, new_value), ""),
 						"changed_by": v.owner,
 						"changed_by_name": frappe.utils.get_fullname(v.owner),
 						"changed_on": v.creation,
 					}
 				)
 
-	if not rows:
+	if not candidates:
 		return False
 
-	for idx, row in enumerate(rows, start=1):
+	if not existing:
+		missing = candidates
+	else:
+		# already partly live-tracked (e.g. moved through one state before this app existed,
+		# then another after install) - only fill in Version transitions that predate the
+		# earliest transition already being tracked live, so nothing live-tracked is duplicated.
+		first_live_ts = min(frappe.utils.get_datetime(r.changed_on) for r in existing)
+		missing = [c for c in candidates if frappe.utils.get_datetime(c["changed_on"]) < first_live_ts]
+
+	if not missing:
+		return False
+
+	for row in existing:
+		frappe.db.set_value(
+			"Workflow State Log", row.name, "idx", row.idx + len(missing), update_modified=False
+		)
+
+	for idx, row in enumerate(missing, start=1):
 		child = frappe.new_doc("Workflow State Log")
 		child.update(row)
-		child.action = ""
 		child.parent = docname
 		child.parenttype = doctype
 		child.parentfield = "workflow_log"

@@ -157,6 +157,9 @@ class TestWorkflowStateLog(FrappeTestCase):
 		self.assertEqual(len(log), 1)
 		self.assertEqual(log[0].from_state, "Draft")
 		self.assertEqual(log[0].to_state, "Pending Approval")
+		# unambiguous in this workflow (only one transition goes Draft -> Pending Approval),
+		# so the action name is inferred even though Version history doesn't record it directly
+		self.assertEqual(log[0].action, "Submit for Approval")
 		self.assertEqual(log[0].changed_by, "Administrator")
 		self.assertEqual(log[0].changed_by_name, frappe.utils.get_fullname("Administrator"))
 		self.assertIsNotNone(log[0].changed_on)
@@ -165,6 +168,57 @@ class TestWorkflowStateLog(FrappeTestCase):
 		second_summary = backfill_workflow_log_history(document_type=TEST_DOCTYPE)
 		self.assertEqual(second_summary[TEST_DOCTYPE]["documents_updated"], 0)
 		self.assertEqual(len(frappe.get_doc(TEST_DOCTYPE, doc.name).get("workflow_log")), 1)
+
+	def test_history_backfill_fills_gap_for_partially_tracked_document(self):
+		"""A document that transitioned once before this app existed and again afterwards
+		already has some live-tracked rows - only the missing, earlier portion should be
+		filled in, without touching or duplicating what's already tracked live."""
+		from workflow_tracker.setup import backfill_workflow_log_history
+
+		doc = frappe.get_doc(
+			{"doctype": TEST_DOCTYPE, "title": "Partially Tracked Record", "workflow_state": "Draft"}
+		).insert(ignore_permissions=True)
+
+		frappe.flags.in_test = False
+		try:
+			frappe.form_dict["action"] = "Submit for Approval"
+			apply_workflow(doc, "Submit for Approval")
+			frappe.form_dict.pop("action", None)
+		finally:
+			frappe.flags.in_test = True
+
+		# simulate the gap: this first transition predates the app, so it has no log row yet
+		frappe.db.delete("Workflow State Log", {"parenttype": TEST_DOCTYPE, "parent": doc.name})
+
+		# this second transition happens "live", after the app is already tracking
+		doc = frappe.get_doc(TEST_DOCTYPE, doc.name)
+		frappe.form_dict["action"] = "Approve"
+		apply_workflow(doc, "Approve")
+		frappe.form_dict.pop("action", None)
+
+		log_before = frappe.get_doc(TEST_DOCTYPE, doc.name).get("workflow_log")
+		self.assertEqual(len(log_before), 1, "should only have the live-tracked row so far")
+		live_row_name = log_before[0].name
+
+		summary = backfill_workflow_log_history(document_type=TEST_DOCTYPE)
+		self.assertEqual(summary[TEST_DOCTYPE]["documents_updated"], 1)
+
+		log_after = frappe.get_doc(TEST_DOCTYPE, doc.name).get("workflow_log")
+		self.assertEqual(len(log_after), 2)
+
+		self.assertEqual(log_after[0].from_state, "Draft")
+		self.assertEqual(log_after[0].to_state, "Pending Approval")
+		self.assertEqual(log_after[0].action, "Submit for Approval")
+
+		# the original live-tracked row must be untouched, not replaced
+		self.assertEqual(log_after[1].name, live_row_name)
+		self.assertEqual(log_after[1].from_state, "Pending Approval")
+		self.assertEqual(log_after[1].to_state, "Approved")
+		self.assertEqual(log_after[1].action, "Approve")
+
+		second_summary = backfill_workflow_log_history(document_type=TEST_DOCTYPE)
+		self.assertEqual(second_summary[TEST_DOCTYPE]["documents_updated"], 0)
+		self.assertEqual(len(frappe.get_doc(TEST_DOCTYPE, doc.name).get("workflow_log")), 2)
 
 	def test_unrelated_save_does_not_add_log_row(self):
 		doc = frappe.get_doc(
