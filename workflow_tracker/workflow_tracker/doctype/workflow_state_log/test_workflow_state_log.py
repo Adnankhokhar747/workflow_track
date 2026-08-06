@@ -230,3 +230,51 @@ class TestWorkflowStateLog(FrappeTestCase):
 
 		doc = frappe.get_doc(TEST_DOCTYPE, doc.name)
 		self.assertEqual(len(doc.get("workflow_log")), 0)
+
+	def test_activating_a_workflow_turns_on_track_changes(self):
+		"""Some standard doctypes (e.g. Material Request) don't have Track Changes on by
+		default, which silently means their history can never be reconstructed later. Enabling
+		a workflow for a doctype should turn it on going forward."""
+		doctype = "WF Tracker No Track Changes Doc"
+		workflow_name = "WF Tracker No Track Changes Workflow"
+
+		if frappe.db.exists("DocType", doctype):
+			frappe.delete_doc("DocType", doctype, force=True, ignore_permissions=True)
+
+		frappe.get_doc(
+			{
+				"doctype": "DocType",
+				"name": doctype,
+				"module": "Workflow Tracker",
+				"custom": 1,
+				"naming_rule": "Random",
+				"autoname": "hash",
+				"fields": [{"fieldname": "workflow_state", "fieldtype": "Data", "label": "Workflow State"}],
+				"track_changes": 0,
+				"permissions": [
+					{"role": "System Manager", "read": 1, "write": 1, "create": 1, "delete": 1}
+				],
+			}
+		).insert(ignore_permissions=True)
+
+		self.assertFalse(frappe.get_meta(doctype).get("track_changes"))
+
+		try:
+			frappe.get_doc(
+				{
+					"doctype": "Workflow",
+					"workflow_name": workflow_name,
+					"document_type": doctype,
+					"workflow_state_field": "workflow_state",
+					"is_active": 1,
+					"send_email_alert": 0,
+					"states": [{"state": "Draft", "doc_status": "0", "allow_edit": "System Manager"}],
+					"transitions": [],
+				}
+			).insert(ignore_permissions=True)
+
+			self.assertTrue(frappe.get_meta(doctype).get("track_changes"))
+		finally:
+			frappe.delete_doc("Workflow", workflow_name, force=True, ignore_permissions=True)
+			frappe.db.delete("Property Setter", {"doc_type": doctype, "property": "track_changes"})
+			frappe.delete_doc("DocType", doctype, force=True, ignore_permissions=True)

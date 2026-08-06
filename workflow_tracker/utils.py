@@ -23,8 +23,24 @@ def _pick_insert_after(meta):
 	return meta.fields[-1].fieldname if meta.fields else None
 
 
+def _ensure_track_changes(document_type, meta):
+	"""Turn on "Track Changes" for the doctype if it isn't already, so Frappe's own Version
+	log starts capturing history for it - without this, a doctype's older documents can never
+	be reconstructed by backfill_workflow_log_history() no matter how the app is updated, since
+	there would be no history anywhere to recover it from. Only affects documents going forward;
+	it can't retroactively create Version rows for changes that already happened."""
+	if meta.get("track_changes"):
+		return
+
+	from frappe.custom.doctype.property_setter.property_setter import make_property_setter
+
+	make_property_setter(document_type, None, "track_changes", "1", "Check", for_doctype=True)
+	frappe.clear_cache(doctype=document_type)
+
+
 def ensure_workflow_log_field(doc, method=None):
-	"""Attach the Workflow Log child table to whichever doctype a Workflow is enabled on.
+	"""Attach the Workflow Log child table to whichever doctype a Workflow is enabled on, and
+	turn on "Track Changes" for it if it wasn't already (see _ensure_track_changes).
 
 	Safe to call repeatedly (e.g. on every bench migrate): if the field already
 	exists but was anchored at an older position, it gets repositioned to the
@@ -38,6 +54,7 @@ def ensure_workflow_log_field(doc, method=None):
 		return
 
 	meta = frappe.get_meta(document_type)
+	_ensure_track_changes(document_type, meta)
 	insert_after = _pick_insert_after(meta)
 
 	existing = frappe.db.get_value(
