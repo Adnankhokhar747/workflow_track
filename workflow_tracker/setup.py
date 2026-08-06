@@ -11,6 +11,17 @@ PO_WORKFLOW_ACTIONS = ["Submit for Approval", "Approve", "Reject", "Revise"]
 
 def after_install():
 	backfill_existing_workflows()
+	_backfill_workflow_log_history_safe()
+
+
+def _backfill_workflow_log_history_safe():
+	"""Wraps backfill_workflow_log_history() so a problem reconstructing history never fails
+	the app install/migrate itself - platforms like Frappe Cloud run these hooks with no way
+	for the user to intervene or re-run a failed step by hand."""
+	try:
+		backfill_workflow_log_history()
+	except Exception:
+		frappe.log_error(title="workflow_tracker: backfill_workflow_log_history failed")
 
 
 def backfill_existing_workflows():
@@ -27,14 +38,20 @@ def backfill_workflow_log_history(document_type=None):
 	"""Reconstruct Workflow Log rows for documents that changed workflow state before this app
 	was installed, using Frappe's built-in Version (change log) history.
 
+	Runs automatically on `after_install` and on every `after_migrate`, so on a site where
+	workflows are already active this happens on its own - no CLI access needed (this is what
+	makes it work on platforms like Frappe Cloud, where every app update/deploy runs a migrate
+	behind the scenes even without `bench execute` access). It's also safe to re-run manually
+	any time via `bench --site <site> execute workflow_tracker.setup.backfill_workflow_log_history`.
+
 	Only touches documents that currently have zero Workflow Log rows, so it never duplicates or
 	reorders anything the live tracking hook has already recorded going forward. Requires the
 	doctype's "Track Changes" option to have been enabled at the time - otherwise no history
 	exists to reconstruct and the doctype is reported as skipped.
 
 	The reconstructed rows have no `action` (Version history doesn't record the workflow action
-	name, only the field's before/after value) - `from_state`, `to_state`, `changed_by`, and
-	`changed_on` are still accurate.
+	name, only the field's before/after value) - `from_state`, `to_state`, `changed_by`,
+	`changed_by_name`, and `changed_on` are still accurate.
 
 	Pass `document_type` to limit the scan to a single doctype; omit to run for every doctype
 	that currently has an active Workflow. Returns a per-doctype summary dict.
@@ -87,7 +104,13 @@ def _backfill_history_for_document(doctype, docname, state_field):
 			fieldname, old_value, new_value = change[0], change[1], change[2]
 			if fieldname == state_field and old_value != new_value:
 				rows.append(
-					{"from_state": old_value, "to_state": new_value, "changed_by": v.owner, "changed_on": v.creation}
+					{
+						"from_state": old_value,
+						"to_state": new_value,
+						"changed_by": v.owner,
+						"changed_by_name": frappe.utils.get_fullname(v.owner),
+						"changed_on": v.creation,
+					}
 				)
 
 	if not rows:

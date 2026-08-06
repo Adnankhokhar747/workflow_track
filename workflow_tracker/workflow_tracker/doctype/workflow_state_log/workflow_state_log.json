@@ -9,6 +9,7 @@
   "to_state",
   "action",
   "changed_by",
+  "changed_by_name",
   "changed_on"
  ],
  "fields": [
@@ -37,8 +38,15 @@
    "fieldname": "changed_by",
    "fieldtype": "Link",
    "in_list_view": 1,
-   "label": "Changed By",
+   "label": "Changed By (User)",
    "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "changed_by_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Changed By (Name)",
    "read_only": 1
   },
   {

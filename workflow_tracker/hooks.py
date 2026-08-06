@@ -87,12 +87,18 @@ after_install = "workflow_tracker.setup.after_install"
 
 # Migration Hooks
 # ----------------
-# Re-run on every `bench migrate` so any workflow that is (or becomes) active
-# on the site - whether it predates this app or was added since - always has
-# the workflow_log field attached, even if it was never resaved through the
-# "Workflow" doctype's own on_update hook.
+# Re-run on every `bench migrate` (which platforms like Frappe Cloud run automatically on every
+# app update/deploy, even without CLI/SSH access) so:
+#  - any workflow that is (or becomes) active on the site always has the workflow_log field
+#    attached, even if it was never resaved through the "Workflow" doctype's own on_update hook.
+#  - documents that changed workflow state before this app was installed get their history
+#    reconstructed from Frappe's Version log (skips documents that already have log rows, so
+#    this is cheap after the first run).
 
-after_migrate = ["workflow_tracker.setup.backfill_existing_workflows"]
+after_migrate = [
+	"workflow_tracker.setup.backfill_existing_workflows",
+	"workflow_tracker.setup._backfill_workflow_log_history_safe",
+]
 
 # Uninstallation
 # ------------

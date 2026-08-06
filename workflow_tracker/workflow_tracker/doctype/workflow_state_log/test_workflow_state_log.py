@@ -121,6 +121,7 @@ class TestWorkflowStateLog(FrappeTestCase):
 		self.assertEqual(log[0].to_state, "Pending Approval")
 		self.assertEqual(log[0].action, "Submit for Approval")
 		self.assertEqual(log[0].changed_by, "Administrator")
+		self.assertEqual(log[0].changed_by_name, frappe.utils.get_fullname("Administrator"))
 		self.assertIsNotNone(log[0].changed_on)
 
 		self.assertEqual(log[1].from_state, "Pending Approval")
@@ -157,6 +158,7 @@ class TestWorkflowStateLog(FrappeTestCase):
 		self.assertEqual(log[0].from_state, "Draft")
 		self.assertEqual(log[0].to_state, "Pending Approval")
 		self.assertEqual(log[0].changed_by, "Administrator")
+		self.assertEqual(log[0].changed_by_name, frappe.utils.get_fullname("Administrator"))
 		self.assertIsNotNone(log[0].changed_on)
 
 		# re-running must not duplicate rows that are already there

@@ -94,6 +94,7 @@ def log_workflow_state_change(doc, method=None):
 			"to_state": new_state,
 			"action": frappe.form_dict.get("action") or "",
 			"changed_by": frappe.session.user,
+			"changed_by_name": frappe.utils.get_fullname(frappe.session.user),
 			"changed_on": frappe.utils.now_datetime(),
 		},
 	)
