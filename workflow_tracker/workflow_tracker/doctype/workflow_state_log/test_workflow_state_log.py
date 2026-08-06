@@ -278,3 +278,120 @@ class TestWorkflowStateLog(FrappeTestCase):
 			frappe.delete_doc("Workflow", workflow_name, force=True, ignore_permissions=True)
 			frappe.db.delete("Property Setter", {"doc_type": doctype, "property": "track_changes"})
 			frappe.delete_doc("DocType", doctype, force=True, ignore_permissions=True)
+
+	def test_history_backfill_falls_back_to_workflow_comments_without_track_changes(self):
+		"""Doctypes that never had Track Changes on (e.g. Material Request historically) have no
+		Version history at all - but apply_workflow() always adds a "Workflow" Comment recording
+		the resulting state, independent of Track Changes, which the backfill should use instead."""
+		from workflow_tracker.setup import backfill_workflow_log_history
+
+		doctype = "WF Tracker No History Doc"
+		workflow_name = "WF Tracker No History Workflow"
+
+		if frappe.db.exists("DocType", doctype):
+			frappe.delete_doc("DocType", doctype, force=True, ignore_permissions=True)
+
+		frappe.get_doc(
+			{
+				"doctype": "DocType",
+				"name": doctype,
+				"module": "Workflow Tracker",
+				"custom": 1,
+				"naming_rule": "Random",
+				"autoname": "hash",
+				"fields": [
+					{"fieldname": "title", "fieldtype": "Data", "label": "Title"},
+					{"fieldname": "workflow_state", "fieldtype": "Data", "label": "Workflow State"},
+				],
+				"track_changes": 0,
+				"permissions": [
+					{"role": "System Manager", "read": 1, "write": 1, "create": 1, "delete": 1}
+				],
+			}
+		).insert(ignore_permissions=True)
+
+		try:
+			frappe.get_doc(
+				{
+					"doctype": "Workflow",
+					"workflow_name": workflow_name,
+					"document_type": doctype,
+					"workflow_state_field": "workflow_state",
+					"is_active": 1,
+					"send_email_alert": 0,
+					"states": [
+						{"state": "Draft", "doc_status": "0", "allow_edit": "System Manager"},
+						{"state": "Pending Approval", "doc_status": "0", "allow_edit": "System Manager"},
+						{"state": "Approved", "doc_status": "0", "allow_edit": "System Manager"},
+					],
+					"transitions": [
+						{
+							"state": "Draft",
+							"action": "Submit for Approval",
+							"next_state": "Pending Approval",
+							"allowed": "System Manager",
+						},
+						{
+							"state": "Pending Approval",
+							"action": "Approve",
+							"next_state": "Approved",
+							"allowed": "System Manager",
+						},
+					],
+				}
+			).insert(ignore_permissions=True)
+
+			# simulate a site where this doctype never had Track Changes on historically -
+			# our own auto-enable would otherwise turn it on the moment the workflow above saves
+			frappe.db.delete("Property Setter", {"doc_type": doctype, "property": "track_changes"})
+			frappe.clear_cache(doctype=doctype)
+			self.assertFalse(frappe.get_meta(doctype).get("track_changes"))
+
+			doc = frappe.get_doc(
+				{"doctype": doctype, "title": "No Version History Record", "workflow_state": "Draft"}
+			).insert(ignore_permissions=True)
+
+			frappe.form_dict["action"] = "Submit for Approval"
+			apply_workflow(doc, "Submit for Approval")
+			frappe.form_dict.pop("action", None)
+
+			doc = frappe.get_doc(doctype, doc.name)
+			frappe.form_dict["action"] = "Approve"
+			apply_workflow(doc, "Approve")
+			frappe.form_dict.pop("action", None)
+
+			doc_name = doc.name
+
+			self.assertEqual(frappe.db.count("Version", {"ref_doctype": doctype, "docname": doc_name}), 0)
+			self.assertGreaterEqual(
+				frappe.db.count(
+					"Comment",
+					{"reference_doctype": doctype, "reference_name": doc_name, "comment_type": "Workflow"},
+				),
+				2,
+			)
+
+			# simulate the gap: wipe the live-tracked rows, leaving only the Comments behind
+			frappe.db.delete("Workflow State Log", {"parenttype": doctype, "parent": doc_name})
+
+			summary = backfill_workflow_log_history(document_type=doctype)
+			self.assertEqual(summary[doctype]["documents_updated"], 1)
+
+			log = frappe.get_doc(doctype, doc_name).get("workflow_log")
+			self.assertEqual(len(log), 2)
+			self.assertEqual(log[0].from_state, "Draft")
+			self.assertEqual(log[0].to_state, "Pending Approval")
+			self.assertEqual(log[0].action, "Submit for Approval")
+			self.assertEqual(log[0].changed_by, "Administrator")
+			self.assertEqual(log[1].from_state, "Pending Approval")
+			self.assertEqual(log[1].to_state, "Approved")
+			self.assertEqual(log[1].action, "Approve")
+
+			second_summary = backfill_workflow_log_history(document_type=doctype)
+			self.assertEqual(second_summary[doctype]["documents_updated"], 0)
+		finally:
+			frappe.db.delete(doctype)
+			frappe.db.delete("Comment", {"reference_doctype": doctype})
+			frappe.delete_doc("Workflow", workflow_name, force=True, ignore_permissions=True)
+			frappe.db.delete("Property Setter", {"doc_type": doctype, "property": "track_changes"})
+			frappe.delete_doc("DocType", doctype, force=True, ignore_permissions=True)
