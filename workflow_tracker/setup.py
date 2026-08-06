@@ -34,6 +34,7 @@ def backfill_existing_workflows():
 		ensure_workflow_log_field(frappe.get_doc("Workflow", name))
 
 
+@frappe.whitelist()
 def backfill_workflow_log_history(document_type=None):
 	"""Reconstruct Workflow Log rows for documents that changed workflow state before this app
 	was installed, using two sources of history Frappe already keeps:
@@ -74,7 +75,13 @@ def backfill_workflow_log_history(document_type=None):
 
 	Pass `document_type` to limit the scan to a single doctype; omit to run for every doctype
 	that currently has an active Workflow. Returns a per-doctype summary dict.
+
+	Whitelisted (System Manager only) so it can also be triggered on demand via
+	`/api/method/workflow_tracker.setup.backfill_workflow_log_history` - useful on platforms
+	with no `bench execute` access, without waiting for the next deploy/migrate.
 	"""
+	frappe.only_for("System Manager")
+
 	workflows = frappe.get_all(
 		"Workflow", filters={"is_active": 1}, fields=["name", "document_type", "workflow_state_field"]
 	)
