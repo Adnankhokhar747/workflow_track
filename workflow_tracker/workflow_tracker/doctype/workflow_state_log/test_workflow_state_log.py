@@ -96,6 +96,51 @@ class TestWorkflowStateLog(FrappeTestCase):
 	def test_workflow_log_field_is_attached(self):
 		meta = frappe.get_meta(TEST_DOCTYPE)
 		self.assertTrue(meta.get_field("workflow_log"), "workflow_log child table was not auto-attached")
+		section = meta.get_field("workflow_log_section")
+		self.assertIsNotNone(section, "workflow_log_section was not auto-attached")
+		self.assertEqual(section.fieldtype, "Section Break")
+
+		fieldnames = [df.fieldname for df in meta.fields]
+		self.assertEqual(fieldnames[-2:], ["workflow_log_section", "workflow_log"])
+
+	def test_log_section_anchors_at_the_bottom_not_beside_workflow_state(self):
+		from workflow_tracker.utils import _pick_insert_after
+
+		class _Field:
+			def __init__(self, fieldname, fieldtype="Data"):
+				self.fieldname = fieldname
+				self.fieldtype = fieldtype
+
+		# Same shape as Engineering Change Request: workflow state in the header
+		# column, more sections after it, and no tabs. The log must follow the
+		# last real field, not workflow_state, even if a previous run already
+		# appended the log fields.
+		meta = frappe._dict(
+			fields=[
+				_Field("request_title"),
+				_Field("column_break_header", "Column Break"),
+				_Field("workflow_state"),
+				_Field("originating_eco"),
+				_Field("problem_section", "Section Break"),
+				_Field("problem_statement"),
+				_Field("workflow_log_section", "Section Break"),
+				_Field("workflow_log", "Table"),
+			]
+		)
+		self.assertEqual(_pick_insert_after(meta), "problem_statement")
+
+		# A tabbed form keeps the log at the bottom of the first tab.
+		tabbed = frappe._dict(
+			fields=[
+				_Field("details_tab", "Tab Break"),
+				_Field("title"),
+				_Field("workflow_state"),
+				_Field("notes"),
+				_Field("other_tab", "Tab Break"),
+				_Field("extra"),
+			]
+		)
+		self.assertEqual(_pick_insert_after(tabbed), "notes")
 
 	def test_state_transitions_are_logged(self):
 		doc = frappe.get_doc(
