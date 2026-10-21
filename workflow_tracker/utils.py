@@ -2,25 +2,41 @@ import frappe
 from frappe.custom.doctype.custom_field.custom_field import create_custom_field
 
 WORKFLOW_LOG_FIELDNAME = "workflow_log"
+WORKFLOW_LOG_SECTION = "workflow_log_section"
 WORKFLOW_LOG_DOCTYPE = "Workflow State Log"
+_WORKFLOW_LOG_FIELDS = {WORKFLOW_LOG_FIELDNAME, WORKFLOW_LOG_SECTION}
+
+
+def _content_fields(meta):
+	"""DocType fields excluding the Workflow Log section and table themselves."""
+	return [f for f in meta.fields if f.fieldname not in _WORKFLOW_LOG_FIELDS]
 
 
 def _pick_insert_after(meta):
-	"""Anchor the Workflow Log field at the end of the doctype's first tab (the
-	"Details"-equivalent tab that holds the fields before any explicit Tab
-	Break), so the log sits at the bottom of the main tab instead of crowding
-	the top of the form next to Workflow State. Falls back to workflow_state,
-	then the very last field, for doctypes that have no tabs at all."""
-	tab_break_idx = next(
-		(i for i, f in enumerate(meta.fields) if f.fieldtype == "Tab Break"), None
-	)
-	if tab_break_idx is not None and tab_break_idx > 0:
-		return meta.fields[tab_break_idx - 1].fieldname
+	"""Field the Workflow Log section should follow.
 
-	if meta.get_field("workflow_state"):
-		return "workflow_state"
+	That is the last field of the first tab, so the log is a full-width section
+	at the bottom of the main form. A doctype with no tabs uses its last field.
+	Never anchor on workflow_state: that field sits in the header, and pinning
+	the log there crams the table into the top column.
+	"""
+	fields = _content_fields(meta)
+	if not fields:
+		return None
 
-	return meta.fields[-1].fieldname if meta.fields else None
+	tab_indexes = [i for i, f in enumerate(fields) if f.fieldtype == "Tab Break"]
+	if not tab_indexes:
+		return fields[-1].fieldname
+
+	# Fields before the first Tab Break are an implicit first tab.
+	if tab_indexes[0] > 0:
+		return fields[tab_indexes[0] - 1].fieldname
+
+	# The first field is already a Tab Break. End that tab at the next one.
+	if len(tab_indexes) >= 2:
+		return fields[tab_indexes[1] - 1].fieldname
+
+	return fields[-1].fieldname
 
 
 def _ensure_track_changes(document_type, meta):
@@ -42,9 +58,9 @@ def ensure_workflow_log_field(doc, method=None):
 	"""Attach the Workflow Log child table to whichever doctype a Workflow is enabled on, and
 	turn on "Track Changes" for it if it wasn't already (see _ensure_track_changes).
 
-	Safe to call repeatedly (e.g. on every bench migrate): if the field already
-	exists but was anchored at an older position, it gets repositioned to the
-	current placement rule instead of being skipped.
+	Safe to call repeatedly (e.g. on every bench migrate): if the section or the
+	table already exists but was anchored at an older position, both are moved
+	to the current placement rule instead of being skipped.
 	"""
 	if not doc.is_active:
 		return
@@ -55,23 +71,55 @@ def ensure_workflow_log_field(doc, method=None):
 
 	meta = frappe.get_meta(document_type)
 	_ensure_track_changes(document_type, meta)
-	insert_after = _pick_insert_after(meta)
-
-	existing = frappe.db.get_value(
-		"Custom Field", {"dt": document_type, "fieldname": WORKFLOW_LOG_FIELDNAME}, "insert_after"
-	)
-	if existing is not None:
-		if existing != insert_after:
-			frappe.db.set_value(
-				"Custom Field",
-				{"dt": document_type, "fieldname": WORKFLOW_LOG_FIELDNAME},
-				"insert_after",
-				insert_after,
-			)
-			frappe.clear_cache(doctype=document_type)
+	anchor = _pick_insert_after(meta)
+	if not anchor:
 		return
 
-	if meta.get_field(WORKFLOW_LOG_FIELDNAME):
+	_ensure_section(document_type, anchor)
+	_ensure_table(document_type)
+
+
+def _custom_field_name(document_type, fieldname):
+	return frappe.db.get_value("Custom Field", {"dt": document_type, "fieldname": fieldname}, "name")
+
+
+def _move_custom_field(document_type, fieldname, insert_after):
+	"""Point an existing custom field at insert_after. Returns whether the field exists."""
+	name = _custom_field_name(document_type, fieldname)
+	if not name:
+		return False
+
+	if frappe.db.get_value("Custom Field", name, "insert_after") != insert_after:
+		frappe.db.set_value("Custom Field", name, "insert_after", insert_after)
+		frappe.clear_cache(doctype=document_type)
+	return True
+
+
+def _ensure_section(document_type, anchor):
+	"""Full-width section so the log is not stuck inside the header column."""
+	if _move_custom_field(document_type, WORKFLOW_LOG_SECTION, anchor):
+		return
+
+	if frappe.get_meta(document_type).get_field(WORKFLOW_LOG_SECTION):
+		return
+
+	create_custom_field(
+		document_type,
+		{
+			"fieldname": WORKFLOW_LOG_SECTION,
+			"label": "Workflow Log",
+			"fieldtype": "Section Break",
+			"insert_after": anchor,
+		},
+	)
+	frappe.clear_cache(doctype=document_type)
+
+
+def _ensure_table(document_type):
+	if _move_custom_field(document_type, WORKFLOW_LOG_FIELDNAME, WORKFLOW_LOG_SECTION):
+		return
+
+	if frappe.get_meta(document_type).get_field(WORKFLOW_LOG_FIELDNAME):
 		return
 
 	create_custom_field(
@@ -81,7 +129,7 @@ def ensure_workflow_log_field(doc, method=None):
 			"label": "Workflow Log",
 			"fieldtype": "Table",
 			"options": WORKFLOW_LOG_DOCTYPE,
-			"insert_after": insert_after,
+			"insert_after": WORKFLOW_LOG_SECTION,
 			"read_only": 1,
 			"print_hide": 1,
 			"no_copy": 1,
